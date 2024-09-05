@@ -5,16 +5,31 @@ This module implements a Bitcoin block construction algorithm that selects
 transactions from a mempool to create a block that maximizes transaction fees
 while respecting block weight limits and transaction dependencies.
 
-The main components are:
-1. MempoolManager: Parses and manages the mempool of transactions.
-2. BlockConstructor: Constructs and optimizes a block from the mempool.
-3. Parallel processing: Utilizes multiple CPU cores for faster block construction.
+Features:
+- Parses mempool transactions from a CSV file
+- Constructs a block that maximizes transaction fees
+- Respects transaction dependencies and block weight limits
+- Utilizes parallel processing for improved performance
+- Includes comprehensive logging for debugging and monitoring
+- Supports command-line arguments for flexible usage
+- Provides a dry run mode for testing without file output
 
 Usage:
-    python bitcoin_block_constructor.py
+    python bitcoin_block_constructor.py [-h] [-i INPUT] [-o OUTPUT] 
+                                        [-l {DEBUG,INFO,WARNING,ERROR,CRITICAL}] 
+                                        [-p PROCESSES] [--dry-run]
 
-The script reads transactions from 'mempool.csv' and outputs the constructed
-block to 'block.txt'.
+Optional arguments:
+    -h, --help            Show this help message and exit
+    -i INPUT, --input INPUT
+                          Input CSV file path (default: mempool.csv)
+    -o OUTPUT, --output OUTPUT
+                          Output block file path (default: block.txt)
+    -l {DEBUG,INFO,WARNING,ERROR,CRITICAL}, --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+                          Set the logging level (default: INFO)
+    -p PROCESSES, --processes PROCESSES
+                          Number of processes to use (default: number of CPU cores)
+    --dry-run             Perform a dry run without writing output file
 
 Requirements:
     Python 3.7+
@@ -27,10 +42,8 @@ from typing import Dict, List, Set
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+import argparse
+import os
 
 @dataclass
 class Transaction:
@@ -80,7 +93,13 @@ class MempoolManager:
 
         Args:
             file_path (str): Path to the CSV file containing mempool transactions.
+
+        Raises:
+            FileNotFoundError: If the specified input file does not exist.
         """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Input file not found: {file_path}")
+
         logger.info(f"Parsing mempool CSV file: {file_path}")
         with open(file_path, 'r') as file:
             reader = csv.reader(file)
@@ -250,7 +269,7 @@ def process_chunk(chunk: List[Transaction], max_weight: int) -> List[str]:
     Returns:
         List[str]: List of transaction IDs selected for the block.
     """
-    logger.info(f"Processing chunk of {len(chunk)} transactions")
+    logger.debug(f"Processing chunk of {len(chunk)} transactions")
     block = []
     weight = 0
     for tx in chunk:
@@ -286,44 +305,85 @@ def parallel_construct_block(mempool: MempoolManager, num_processes: int) -> Lis
     logger.info("Parallel block construction completed")
     return results
 
+def parse_arguments():
+    """
+    Parse command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments
+    """
+    parser = argparse.ArgumentParser(description="Bitcoin Block Constructor")
+    parser.add_argument("-i", "--input", default="mempool.csv", help="Input CSV file path (default: mempool.csv)")
+    parser.add_argument("-o", "--output", default="block.txt", help="Output block file path (default: block.txt)")
+    parser.add_argument("-l", "--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                        help="Set the logging level (default: INFO)")
+    parser.add_argument("-p", "--processes", type=int, default=multiprocessing.cpu_count(),
+                        help="Number of processes to use (default: number of CPU cores)")
+    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without writing output file")
+    return parser.parse_args()
+
+def setup_logging(log_level: str):
+    """
+    Set up logging with the specified log level.
+
+    Args:
+        log_level (str): Desired logging level
+    """
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f'Invalid log level: {log_level}')
+    logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def main():
     """
     Main function to run the Bitcoin block constructor.
 
-    This function orchestrates the entire process of parsing the mempool,
-    constructing and optimizing the block, and writing the results to a file.
+    This function parses command-line arguments, sets up logging, and orchestrates
+    the entire process of parsing the mempool, constructing and optimizing the block,
+    and writing the results to a file (unless in dry run mode).
     """
+    args = parse_arguments()
+    setup_logging(args.log_level)
+
+    global logger
+    logger = logging.getLogger(__name__)
     start_time = time.time()
     logger.info("Starting Bitcoin block construction process")
 
-    mempool_manager = MempoolManager()
-    mempool_manager.parse_mempool_csv('mempool.csv')
+    try:
+        mempool_manager = MempoolManager()
+        mempool_manager.parse_mempool_csv(args.input)
 
-    num_processes = multiprocessing.cpu_count()
-    logger.info(f"Using {num_processes} processes for parallel construction")
+        logger.info(f"Using {args.processes} processes for parallel construction")
 
-    parallel_block = parallel_construct_block(mempool_manager, num_processes)
+        parallel_block = parallel_construct_block(mempool_manager, args.processes)
 
-    block_constructor = BlockConstructor(mempool_manager)
-    for txid in parallel_block:
-        if block_constructor._can_add_to_block(mempool_manager.transactions[txid]):
-            block_constructor._add_to_block(mempool_manager.transactions[txid])
+        block_constructor = BlockConstructor(mempool_manager)
+        for txid in parallel_block:
+            if block_constructor._can_add_to_block(mempool_manager.transactions[txid]):
+                block_constructor._add_to_block(mempool_manager.transactions[txid])
 
-    block_constructor.optimize_block()
+        block_constructor.optimize_block()
 
-    end_time = time.time()
-    execution_time = end_time - start_time
+        end_time = time.time()
+        execution_time = end_time - start_time
 
-    logger.info(f"Number of transactions in the block: {len(block_constructor.block)}")
-    logger.info(f"Total block weight: {block_constructor.block_weight}")
-    logger.info(f"Total fees collected: {block_constructor.block_fees}")
-    logger.info(f"Execution time: {execution_time:.2f} seconds")
+        logger.info(f"Number of transactions in the block: {len(block_constructor.block)}")
+        logger.info(f"Total block weight: {block_constructor.block_weight}")
+        logger.info(f"Total fees collected: {block_constructor.block_fees}")
+        logger.info(f"Execution time: {execution_time:.2f} seconds")
 
-    with open('block.txt', 'w') as f:
-        for txid in block_constructor.block:
-            f.write(f"{txid}\n")
+        if not args.dry_run:
+            with open(args.output, 'w') as f:
+                for txid in block_constructor.block:
+                    f.write(f"{txid}\n")
+            logger.info(f"Block transactions written to '{args.output}'")
+        else:
+            logger.info("Dry run completed. No output file written.")
 
-    logger.info("Block transactions written to 'block.txt'")
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
